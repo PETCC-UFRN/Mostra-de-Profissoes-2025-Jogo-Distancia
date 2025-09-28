@@ -12,7 +12,7 @@ from collections import deque
 st.set_page_config(page_title="Jogo de Rotas", layout="wide")
 st.title("🗺️ Jogo de Rotas: Você vs. o Algoritmo")
 
-# --- FUNÇÕES E CLASSES DO ALGORITMO (sem alterações) ---
+# --- FUNÇÕES E CLASSES DO ALGORITMO ---
 def haversine(lat1, lon1, lat2, lon2):
     R = 6371000.0
     p1 = np.deg2rad(lat1)
