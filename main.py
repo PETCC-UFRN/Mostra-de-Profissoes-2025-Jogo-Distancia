@@ -2,6 +2,7 @@ import streamlit as st
 import osmnx as ox
 import networkx as nx
 import folium
+from folium.plugins import BeautifyIcon
 from streamlit_folium import st_folium
 import heapq
 import numpy as np
@@ -11,7 +12,7 @@ from collections import deque
 st.set_page_config(page_title="Jogo de Rotas", layout="wide")
 st.title("🗺️ Jogo de Rotas: Você vs. o Algoritmo")
 
-# --- FUNÇÕES E CLASSES DO ALGORITMO (mesmas de antes, sem alterações) ---
+# --- FUNÇÕES E CLASSES DO ALGORITMO (sem alterações) ---
 def haversine(lat1, lon1, lat2, lon2):
     R = 6371000.0
     p1 = np.deg2rad(lat1)
@@ -92,171 +93,148 @@ class AStarMapProblem(MapProblem):
     def step_cost_fn(self, state, action):
         return self.G.get_edge_data(state, action)[0]['length']
 
-# --- FUNÇÕES AUXILIARES PARA A APLICAÇÃO ---
+# --- FUNÇÕES AUXILIARES ---
 @st.cache_data
 def get_graph(lat_o, lon_o, lat_d, lon_d, mode, margin):
-    """Função com cache para baixar e guardar o grafo, evitando downloads repetidos."""
     return graph(lat_o, lon_o, lat_d, lon_d, mode=mode, margin=margin)
 
 def calculate_astar_path(G, start_node, goal_node):
-    """Calcula o caminho ótimo usando A*."""
     problem = AStarMapProblem(G, start_node=start_node, goal_node=goal_node, heuristic_fn=heuristic_fn)
     search = AStarSearch(problem)
     solution_node = search.search()
-    if not solution_node:
-        return None, float('inf')
-    
-    path = []
-    node = solution_node
-    while node:
-        path.append(node.state)
-        node = node.parent
+    if not solution_node: return None, float('inf')
+    path = []; node = solution_node
+    while node: path.append(node.state); node = node.parent
     path.reverse()
     return path, solution_node.path_cost
 
 def initialize_session_state():
-    """Define os valores iniciais para o estado da sessão."""
-    if "user_path" not in st.session_state:
-        st.session_state.user_path = []
-    if "astar_path" not in st.session_state:
-        st.session_state.astar_path = None
-    if "astar_dist" not in st.session_state:
-        st.session_state.astar_dist = 0
-    if "user_dist" not in st.session_state:
-        st.session_state.user_dist = 0
-    if "start_node" not in st.session_state:
-        st.session_state.start_node = None
-    if "goal_node" not in st.session_state:
-        st.session_state.goal_node = None
-    if "graph" not in st.session_state:
-        st.session_state.graph = None
-    if "game_started" not in st.session_state:
-        st.session_state.game_started = False
+    if "game_started" not in st.session_state: st.session_state.game_started = False
+    if "map_center" not in st.session_state: st.session_state.map_center = None
+    if "map_zoom" not in st.session_state: st.session_state.map_zoom = 15
 
-# --- INTERFACE DO USUÁRIO (SIDEBAR) ---
+# --- INTERFACE (SIDEBAR) ---
 with st.sidebar:
-    st.header("1. Defina a Origem e o Destino")
+    st.header("1. Defina a Rota")
     lat_origin = st.number_input("Latitude Origem", value=-5.8318, format="%.4f")
     lon_origin = st.number_input("Longitude Origem", value=-35.2055, format="%.4f")
     lat_goal = st.number_input("Latitude Destino", value=-5.8414, format="%.4f")
     lon_goal = st.number_input("Longitude Destino", value=-35.1971, format="%.4f")
     
     if st.button("Iniciar Jogo", type="primary"):
-        for key in st.session_state.keys():
-            del st.session_state[key]
-        initialize_session_state()
-
-        with st.spinner("Baixando mapa e calculando a melhor rota..."):
+        with st.spinner("Calculando a melhor rota..."):
             G = get_graph(lat_origin, lon_origin, lat_goal, lon_goal, mode="walk", margin=200)
             start_node = ox.nearest_nodes(G, lon_origin, lat_origin)
             goal_node = ox.nearest_nodes(G, lon_goal, lat_goal)
-            
             astar_path, astar_dist = calculate_astar_path(G, start_node, goal_node)
-
+            
             st.session_state.graph = G
-            st.session_state.start_node = start_node
-            st.session_state.goal_node = goal_node
-            st.session_state.astar_path = astar_path
-            st.session_state.astar_dist = astar_dist
+            st.session_state.start_node, st.session_state.goal_node = start_node, goal_node
+            st.session_state.astar_path, st.session_state.astar_dist = astar_path, astar_dist
             st.session_state.user_path = [start_node]
+            st.session_state.map_center = [(lat_origin + lat_goal)/2, (lon_origin + lon_goal)/2]
+            st.session_state.map_zoom = 16
             st.session_state.game_started = True
             st.rerun()
 
-# --- LÓGICA PRINCIPAL E EXIBIÇÃO DO MAPA ---
+# --- LÓGICA PRINCIPAL ---
 initialize_session_state()
 
 if not st.session_state.game_started:
     st.info("Defina os pontos de origem e destino na barra lateral e clique em 'Iniciar Jogo'.")
 else:
     G = st.session_state.graph
-    start_node = st.session_state.start_node
-    goal_node = st.session_state.goal_node
+    start_node, goal_node = st.session_state.start_node, st.session_state.goal_node
     
     col1, col2 = st.columns([1, 2])
-
     with col1:
-        st.header("2. Desenhe sua rota")
-        st.write("Clique no mapa para adicionar pontos ao seu caminho. Comece pela origem (verde).")
-        
-        st.metric("Distância da Rota Ótima (A*)", f"{st.session_state.astar_dist:.2f} m")
+        st.header("2. Seu Jogo")
+        st.write("Clique nos pontos azuis para avançar. Para voltar, clique no ponto pulsante.")
         
         user_dist = 0
-        is_valid_path = False
         if len(st.session_state.user_path) > 1:
             try:
                 user_dist = nx.path_weight(G, st.session_state.user_path, weight='length')
-                is_valid_path = True
-            except (nx.NetworkXNoPath, nx.NodeNotFound):
-                is_valid_path = False
+            except (nx.NetworkXNoPath, nx.NodeNotFound): pass
         
-        st.metric("Sua Distância (parcial)", f"{user_dist:.2f} m")
+        st.metric("Distância da Rota Ótima (A*)", f"{st.session_state.astar_dist:.2f} m")
+        st.metric("Sua Distância Atual", f"{user_dist:.2f} m")
 
-        if not is_valid_path and len(st.session_state.user_path) > 1:
-            st.error("Caminho inválido! Você selecionou um ponto não conectado diretamente ao anterior.")
-        
         if goal_node in st.session_state.user_path:
-            st.success("Parabéns, você chegou ao destino!")
+            st.success("Você chegou ao destino!")
             diferenca = user_dist - st.session_state.astar_dist
-            st.info(f"Sua rota foi {diferenca:.2f} metros mais longa que a rota ótima.")
-
-        if st.button("Reiniciar Rota do Usuário"):
+            st.info(f"Sua rota foi {diferenca:.2f} m mais longa que a ótima.")
+        
+        if st.button("Reiniciar Meu Caminho"):
             st.session_state.user_path = [start_node]
             st.rerun()
             
     with col2:
-        # --- CRIAÇÃO DO MAPA INTERATIVO ---
-        map_center = [(lat_origin + lat_goal)/2, (lon_origin + lon_goal)/2]
-        m = folium.Map(location=map_center, zoom_start=16, tiles="cartodbpositron")
+        m = folium.Map(location=st.session_state.map_center, zoom_start=st.session_state.map_zoom, tiles="cartodbpositron")
 
-        if len(st.session_state.user_path) > 1:
-            path_coords = [(G.nodes[n]['y'], G.nodes[n]['x']) for n in st.session_state.user_path]
-            folium.PolyLine(path_coords, color="cyan", weight=5, opacity=0.8, tooltip="Sua Rota").add_to(m)
-
-        for node_id in st.session_state.user_path:
-            node_data = G.nodes[node_id]
-            folium.CircleMarker(
-                location=(node_data['y'], node_data['x']),
-                radius=5, color="cyan", fill=True, fill_color="cyan", fill_opacity=1
-            ).add_to(m)
-
-        # --- LÓGICA PRINCIPAL: Mostrar apenas os próximos passos válidos ---
-        # 1. Pega o último nó do caminho do usuário como o ponto atual.
         current_node = st.session_state.user_path[-1]
-
-        # 2. Encontra todos os vizinhos do nó atual no grafo.
         valid_next_nodes = list(G.neighbors(current_node))
 
-        # 3. Desenha apenas os vizinhos como opções clicáveis.
+        if goal_node in st.session_state.user_path:
+            path_coords_astar = [(G.nodes[n]['y'], G.nodes[n]['x']) for n in st.session_state.astar_path]
+            # Usando uma linha tracejada para diferenciar bem
+            folium.PolyLine(
+                path_coords_astar,
+                color="lime",
+                weight=7,
+                opacity=0.9,
+                dash_array='10, 5',
+                tooltip="Rota Ótima (Algoritmo)"
+            ).add_to(m)
+
+        # Desenha a linha e os pontos do caminho do usuário
+        if len(st.session_state.user_path) > 1:
+            path_coords = [(G.nodes[n]['y'], G.nodes[n]['x']) for n in st.session_state.user_path]
+            folium.PolyLine(path_coords, color="#00ffff", weight=5, opacity=0.8, tooltip="Sua Rota").add_to(m)
+        
+        # Desenha os pontos já visitados (exceto o último)
+        for node_id in st.session_state.user_path[:-1]:
+            node_data = G.nodes[node_id]
+            folium.CircleMarker(location=(node_data['y'], node_data['x']), radius=5, color="#00ffff", fill_color="#00ffff", fill=True).add_to(m)
+
+        # Destaca o ponto ATUAL com um ícone pulsante para a função "voltar"
+        node_data = G.nodes[current_node]
+        icon = BeautifyIcon(icon_shape='marker', border_color='#00ffff', background_color='#00ffff', inner_icon_style='font-size:0px;', spin=True)
+        folium.Marker(location=(node_data['y'], node_data['x']), icon=icon, tooltip="Sua posição atual (Clique para voltar)").add_to(m)
+
+        # Desenha os próximos passos válidos
         for node_id in valid_next_nodes:
             if node_id not in st.session_state.user_path:
                 node_data = G.nodes[node_id]
-                folium.CircleMarker(
-                    location=(node_data['y'], node_data['x']),
-                    radius=7,
-                    color="blue",
-                    fill=True,
-                    fill_color="blue",
-                    fill_opacity=0.7,
-                    tooltip="Próximo passo válido"
-                ).add_to(m)
+                folium.CircleMarker(location=(node_data['y'], node_data['x']), radius=7, color="#0000ff", fill=True, fill_color="#0000ff", tooltip=f"Avançar para o nó {node_id}").add_to(m)
 
-        if goal_node in st.session_state.user_path:
-             path_coords_astar = [(G.nodes[n]['y'], G.nodes[n]['x']) for n in st.session_state.astar_path]
-             folium.PolyLine(path_coords_astar, color="lime", weight=5, opacity=0.8, tooltip="Rota Ótima").add_to(m)
+        # Marcadores de início e fim
+        folium.Marker([G.nodes[start_node]['y'], G.nodes[start_node]['x']], popup="Origem", icon=folium.Icon(color="green", icon="play")).add_to(m)
+        folium.Marker([G.nodes[goal_node]['y'], G.nodes[goal_node]['x']], popup="Destino", icon=folium.Icon(color="red", icon="stop")).add_to(m)
+        
+        # Exibe o mapa
+        map_data = st_folium(m, width='100%', height=500)
 
-        folium.Marker([lat_origin, lon_origin], popup="Origem", icon=folium.Icon(color="green", icon="play")).add_to(m)
-        folium.Marker([lat_goal, lon_goal], popup="Destino", icon=folium.Icon(color="red", icon="stop")).add_to(m)
+        # Salva o estado do mapa de forma segura
+        if map_data and map_data.get("center") and map_data.get("zoom"):
+            st.session_state.map_center = [map_data["center"]["lat"], map_data["center"]["lng"]]
+            st.session_state.map_zoom = map_data["zoom"]
 
-        map_data = st_folium(m, width='100%', height=500, key="mapa_dinamico")
+        # Lógica de clique corrigida
+        clicked_node = None
+        click_coords = None
 
-        # --- PROCESSAMENTO DO CLIQUE COM A NOVA LÓGICA ---
-        if map_data and map_data["last_clicked"]:
-            lat, lon = map_data["last_clicked"]["lat"], map_data["last_clicked"]["lng"]
-            clicked_node = ox.nearest_nodes(G, lon, lat)
+        if map_data and map_data.get("last_object_clicked"):
+            click_coords = map_data["last_object_clicked"]
+        elif map_data and map_data.get("last_clicked"):
+            click_coords = map_data["last_clicked"]
 
-            if clicked_node in valid_next_nodes:
-                if clicked_node not in st.session_state.user_path:
-                    st.session_state.user_path.append(clicked_node)
-                    st.rerun()
-            else:
-                st.toast("Por favor, clique em um dos pontos azuis disponíveis.", icon="👆")
+        if click_coords:
+            clicked_node = ox.nearest_nodes(G, click_coords['lng'], click_coords['lat'])
+
+            if clicked_node == current_node and len(st.session_state.user_path) > 1:
+                st.session_state.user_path.pop()
+                st.rerun()
+            elif clicked_node in valid_next_nodes and clicked_node not in st.session_state.user_path:
+                st.session_state.user_path.append(clicked_node)
+                st.rerun()
